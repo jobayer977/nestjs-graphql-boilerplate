@@ -1,0 +1,134 @@
+name: Production Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  Build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v2
+
+      - name: Genarate .env and .crt for db
+        run: |
+          envsubst "`printf '${%s} ' $(sh -c "env|cut -d'=' -f1")`" < ./environments/example.env > ./environments/$NODE_ENV.env
+          echo "$(cat ./environments/$NODE_ENV.env)"
+        env:
+          PORT: 4000
+          APP_URL: /api
+          APP_ENV: production
+          NODE_ENV: production
+          TZ: Asia/Dhaka
+
+          API_PREFIX: api/v1
+          API_TITLE: Nebula RESTful API Service
+          API_DESC: Nebula RESTful API Service
+          API_VERSION: 0.0.1
+
+          MONGO_URI: ${{ secrets.PRODUCTION_MONGO_URI }}
+
+          JWT_SECRET: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8k3x3Wi9V3kMkYu9tjDaSRD2cBjOgp3FQU/Gndlced9WsaVNx3lgkbbS47sPpFMdQVSgmGbRqhaj9vUrD56+QOMn5HuxeAp5VMwwD$
+          SALT_ROUNDS: 10
+          EXPIRES_IN: 30d
+          REFRESH_TOKEN_EXPIRES_IN: 30d
+          RESET_PASSWORD_EXPIRES_IN: 15m
+          OTP_EXPIRES_IN: 3
+
+          OTP_EXPIRE_TIME_IN_MINUTES: 5
+          OTP_LENGTH: 4
+
+          GOOGLE_CLIENT_ID: ${{ secrets.PROD_GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.PROD_GOOGLE_CLIENT_SECRET }}
+          GOOGLE_CALLBACK_URL: ${{ secrets.PROD_GOOGLE_CALLBACK_URL }}
+          OAUTH_REDIRECT_URL: ${{ secrets.PROD_OAUTH_REDIRECT_URL }}
+
+          FACEBOOK_APP_ID: ${{ secrets.PROD_FACEBOOK_APP_ID }}
+          FACEBOOK_CLIENT_SECRET: ${{ secrets.PROD_FACEBOOK_CLIENT_SECRET }}
+          FACEBOOK_CALLBACK_URL: ${{ secrets.PROD_FACEBOOK_CALLBACK_URL }}
+
+          STRIPE_SECRET_KEY: ${{ secrets.PROD_STRIPE_SECRET }}
+          STRIPE_WEBHOOK_SECRET: ${{ secrets.PROD_STRIPE_WEBHOOK_SECRET }}
+
+      - name: Logging to docker
+        run: docker login -u ${{secrets.DOCKER_USER}} -p ${{secrets.DOCKER_PASSWORD}}
+
+      - name: Build the docker image
+        run: docker build . --file Dockerfile --tag ${{secrets.DOCKER_USER}}/service-production:latest
+
+      - name: Build the docker image with specific tag
+        run: docker build . --file Dockerfile --tag ${{secrets.DOCKER_USER}}/service-production:sha-${{ github.sha }}
+
+      - name: Docker Push
+        run: docker push ${{secrets.DOCKER_USER}}/service-production:latest
+
+      - name: Docker Push with specific tag
+        run: docker push ${{secrets.DOCKER_USER}}/service-production:sha-${{ github.sha }}
+
+  Deploy:
+    needs: Build
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Logging to docker
+        run: docker login -u ${{secrets.DOCKER_USER}} -p ${{secrets.DOCKER_PASSWORD}}
+
+      - name: Deploy To Server
+        uses: appleboy/ssh-action@v0.1.4
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          script: |
+            echo "Logging to docker hub"
+            docker login -u ${{secrets.DOCKER_USER}} -p ${{secrets.DOCKER_PASSWORD}} 
+
+            echo "Stopping previous build"
+            docker stop service-production
+
+            echo "Removing previous build"
+            docker rm service-production
+
+            echo "Removing old image from local"
+            docker rmi ${{secrets.DOCKER_USER}}/service-production:latest
+
+            echo "Pulling latest image from docker hub"
+            docker pull ${{secrets.DOCKER_USER}}/service-production:latest
+
+  Run:
+    needs: Deploy
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Logging to docker
+        run: docker login -u ${{secrets.DOCKER_USER}} -p ${{secrets.DOCKER_PASSWORD}}
+
+      - name: Deploy To Server
+        uses: appleboy/ssh-action@v0.1.4
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          script: |
+            echo "Logging to docker hub"
+            docker login -u ${{secrets.DOCKER_USER}} -p ${{secrets.DOCKER_PASSWORD}}
+
+            echo "Starting latest build"
+
+            docker run -e NODE_ENV=production -d \
+              --restart always \
+              -p 9200:4000 \
+              --name service-production \
+              ${{secrets.DOCKER_USER}}/service-production:latest
+
+            echo "Deploy Done"
